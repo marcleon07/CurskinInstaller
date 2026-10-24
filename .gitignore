@@ -1,0 +1,25 @@
+# Build output
+*.exe
+*.pdb
+*.dll
+/dist/
+/bin/
+/obj/
+*.user
+*.suo
+.vs/
+
+# Extracted helper tools (the compressed .gz resources are tracked)
+/avifdec.exe
+/resvg.exe
+/tools/
+
+# Local logs and test output
+*.log
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
