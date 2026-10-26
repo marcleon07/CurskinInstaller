@@ -25,6 +25,12 @@ namespace CurskinInstaller
                 return;
             }
 
+            if (args.Length >= 1 && string.Equals(args[0], "--reapply", StringComparison.OrdinalIgnoreCase))
+            {
+                Environment.ExitCode = RunReapply();
+                return;
+            }
+
             string initial = null;
             if (args.Length >= 1 && File.Exists(args[0]))
                 initial = args[0];
@@ -44,6 +50,31 @@ namespace CurskinInstaller
                 Console.Error.WriteLine("ERROR: " + ex.Message);
                 return 1;
             }
+        }
+
+        // Runs from the per-user Run key after sign-in. Windows can load its own
+        // cursors during logon even when the custom scheme is still selected, so
+        // re-apply a few times to cover late cursor initialization.
+        static int RunReapply()
+        {
+            int[] delays = { 0, 3000, 7000, 15000 };
+            int applied = 0;
+
+            foreach (int delay in delays)
+            {
+                if (delay > 0)
+                    System.Threading.Thread.Sleep(delay);
+
+                try
+                {
+                    applied = Math.Max(applied, Installer.ReapplyCurrentScheme());
+                }
+                catch
+                {
+                }
+            }
+
+            return applied > 0 ? 0 : 1;
         }
 
         static int RunHeadless(string[] args)
@@ -67,15 +98,20 @@ namespace CurskinInstaller
 
                 bool apply = true;
                 bool mixed = selected.Count > 1;
+                bool keep = false;
                 for (int i = 2; i < args.Length; i++)
                 {
                     if (string.Equals(args[i], "--no-apply", StringComparison.OrdinalIgnoreCase))
                         apply = false;
                     if (string.Equals(args[i], "--no-mixed", StringComparison.OrdinalIgnoreCase))
                         mixed = false;
+                    if (string.Equals(args[i], "--startup", StringComparison.OrdinalIgnoreCase))
+                        keep = true;
+                    if (string.Equals(args[i], "--no-startup", StringComparison.OrdinalIgnoreCase))
+                        keep = false;
                 }
 
-                InstallResult result = Installer.Install(path, skin, selected, mixed, apply,
+                InstallResult result = Installer.Install(path, skin, selected, mixed, apply, keep,
                     delegate(string message) { Console.WriteLine(message); });
 
                 Console.WriteLine("OK");
@@ -84,6 +120,14 @@ namespace CurskinInstaller
                 Console.WriteLine("Applied: " + (result.AppliedScheme == null ? "(none)" : result.AppliedScheme));
                 Console.WriteLine("Folder: " + result.InstallDir);
                 Console.WriteLine("Files: " + result.FileCount.ToString());
+                if (result.ThemeSynced)
+                    Console.WriteLine("Theme: " + result.ThemeFile);
+                if (result.ThemeError != null)
+                    Console.WriteLine("Theme warning: " + result.ThemeError);
+                if (result.StartupRegistered)
+                    Console.WriteLine("Startup: cursors will be re-applied after sign-in");
+                if (result.StartupError != null)
+                    Console.WriteLine("Startup warning: " + result.StartupError);
                 if (result.MouseXRunning)
                     Console.WriteLine("Note: Mouse X is running.");
                 return 0;

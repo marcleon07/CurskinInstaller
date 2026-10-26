@@ -16,6 +16,11 @@ namespace CurskinInstaller
         public string InstallDir = "";
         public int FileCount;
         public bool MouseXRunning;
+        public bool StartupRegistered;
+        public string StartupError;
+        public bool ThemeSynced;
+        public string ThemeFile = "";
+        public string ThemeError;
     }
 
     class VariantInstall
@@ -46,6 +51,16 @@ namespace CurskinInstaller
             "Hand", "Pin", "Person"
         };
 
+        // Role order used inside a .theme file. Windows writes the section in
+        // alphabetical order, so keeping that order makes the file look exactly
+        // like the one Personalization writes.
+        private static readonly string[] ThemeRoleOrder =
+        {
+            "AppStarting", "Arrow", "Crosshair", "Hand", "Help", "IBeam", "No",
+            "NWPen", "Person", "Pin", "SizeAll", "SizeNESW", "SizeNS", "SizeNWSE",
+            "SizeWE", "UpArrow", "Wait"
+        };
+
         private static readonly string[][] Fallbacks =
         {
             new string[] { "ARROW" },
@@ -69,10 +84,39 @@ namespace CurskinInstaller
 
         private const string CursorKeyPath = @"Control Panel\Cursors";
         private const string SchemesKeyPath = @"Control Panel\Cursors\Schemes";
+        private const string ThemesKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Themes";
+        private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        private const string RunValueName = "CurskinInstaller";
         private const string BackupFileName = "original-cursors.txt";
+        private const string ThemeBackupFileName = "original-theme.txt";
+        private const string CursorSectionHeader = "[Control Panel\\Cursors]";
+
+        // System cursor slots accepted by SetSystemCursor. The three roles with
+        // an id of 0 have no slot; SPI_SETCURSORS is the only way to set them.
+        private static readonly uint[] CursorSlotIds =
+        {
+            32512, // Arrow      OCR_NORMAL
+            32651, // Help       OCR_HELP
+            32650, // AppStarting OCR_APPSTARTING
+            32514, // Wait       OCR_WAIT
+            32515, // Crosshair  OCR_CROSS
+            32513, // IBeam      OCR_IBEAM
+            0,     // NWPen      (no system cursor slot)
+            32648, // No         OCR_NO
+            32645, // SizeNS     OCR_SIZENS
+            32644, // SizeWE     OCR_SIZEWE
+            32642, // SizeNWSE   OCR_SIZENWSE
+            32643, // SizeNESW   OCR_SIZENESW
+            32646, // SizeAll    OCR_SIZEALL
+            32516, // UpArrow    OCR_UP
+            32649, // Hand       OCR_HAND
+            0,     // Person     (no system cursor slot)
+            0      // Pin        (no system cursor slot)
+        };
 
         public static InstallResult Install(string sourcePath, CurskinSkin skin,
-            List<CurskinVariant> variants, bool createMixed, bool apply, Action<string> progress)
+            List<CurskinVariant> variants, bool createMixed, bool apply, bool keepAfterRestart,
+            Action<string> progress)
         {
             if (skin == null)
                 throw new ArgumentNullException("skin");
@@ -202,6 +246,30 @@ namespace CurskinInstaller
                     throw new InvalidOperationException(
                         "The schemes were installed, but applying the scheme failed: " + ex.Message, ex);
                 }
+
+                // Keep the active theme file in sync with the scheme. Windows
+                // reloads that file during logon, so leaving it alone is what
+                // makes the cursors revert after a restart.
+                SyncActiveTheme(chosen.SchemeName, chosen.Files, result);
+            }
+
+            try
+            {
+                if (apply && keepAfterRestart)
+                {
+                    RegisterStartup();
+                    result.StartupRegistered = true;
+                }
+                else if (apply)
+                {
+                    UnregisterStartup();
+                }
+            }
+            catch (Exception ex)
+            {
+                // The cursors are already applied; a missing sign-in entry
+                // only means Windows may show its own cursors after logon.
+                result.StartupError = ex.Message;
             }
 
             return result;
@@ -263,6 +331,385 @@ namespace CurskinInstaller
                 NativeMethods.SPIF_SENDCHANGE);
         }
 
+        // ---- Active theme file ------------------------------------------------
+
+        // A .theme file carries its own [Control Panel\Cursors] section, and
+        // Windows reloads the active theme during logon. If that section still
+        // points at the default cursors, the scheme stays selected in the
+        // registry but the session comes up with Windows' own pointers. Keeping
+        // the file in sync makes a restart harmless without a startup task.
+        private static void SyncActiveTheme(string schemeName, Dictionary<string, string> files,
+            InstallResult result)
+        {
+            string themePath = GetActiveThemePath();
+            if (themePath == null || !File.Exists(themePath))
+                return;
+
+            try
+            {
+                Encoding encoding;
+                List<string> lines = ReadThemeFile(themePath, out encoding);
+
+                int start;
+                int end;
+                FindCursorSection(lines, out start, out end);
+                if (start < 0)
+                {
+                    // This theme does not own the pointers, so a logon reload
+                    // leaves the registry values alone.
+                    return;
+                }
+
+                BackupThemeSection(themePath, encoding, lines, start, end);
+
+                List<string> section = new List<string>();
+                foreach (string role in ThemeRoleOrder)
+                {
+                    string path;
+                    if (files.TryGetValue(role, out path) && !string.IsNullOrEmpty(path))
+                        section.Add(role + "=" + path);
+                }
+                section.Add("DefaultValue=" + schemeName);
+
+                // Keep any other lines that already lived in the section.
+                for (int i = start + 1; i < end; i++)
+                {
+                    string key = ThemeKey(lines[i]);
+                    if (key == null)
+                    {
+                        if (lines[i].Trim().Length > 0)
+                            section.Add(lines[i]);
+                        continue;
+                    }
+                    if (IsThemeRole(key) ||
+                        string.Equals(key, "DefaultValue", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    section.Add(lines[i]);
+                }
+
+                lines.RemoveRange(start + 1, end - start - 1);
+                lines.InsertRange(start + 1, section);
+
+                WriteThemeFile(themePath, lines, encoding);
+                result.ThemeFile = themePath;
+                result.ThemeSynced = true;
+            }
+            catch (Exception ex)
+            {
+                // The cursors are already applied, so a read-only or missing
+                // theme file is only worth a warning.
+                result.ThemeError = ex.Message;
+            }
+        }
+
+        private static string GetActiveThemePath()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(ThemesKeyPath))
+                {
+                    if (key == null)
+                        return null;
+
+                    string path = ReadString(key, "CurrentTheme");
+                    if (string.IsNullOrWhiteSpace(path))
+                        return null;
+
+                    path = Environment.ExpandEnvironmentVariables(path.Trim().Trim('"'));
+                    return path.EndsWith(".theme", StringComparison.OrdinalIgnoreCase) ? path : null;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool IsThemeRole(string key)
+        {
+            foreach (string role in Roles)
+            {
+                if (string.Equals(role, key, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private static void FindCursorSection(List<string> lines, out int start, out int end)
+        {
+            start = -1;
+            end = lines.Count;
+
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string trimmed = lines[i].Trim();
+                if (trimmed.Length == 0 || trimmed[0] != '[')
+                    continue;
+
+                if (start >= 0)
+                {
+                    end = i;
+                    break;
+                }
+
+                if (string.Equals(trimmed, CursorSectionHeader, StringComparison.OrdinalIgnoreCase))
+                    start = i;
+            }
+        }
+
+        private static string ThemeKey(string line)
+        {
+            int equals = line.IndexOf('=');
+            if (equals <= 0)
+                return null;
+
+            string key = line.Substring(0, equals).Trim();
+            if (key.Length == 0)
+                return null;
+
+            foreach (char c in key)
+            {
+                if (c == '[' || c == ';')
+                    return null;
+            }
+            return key;
+        }
+
+        private static List<string> ReadThemeFile(string path, out Encoding encoding)
+        {
+            byte[] raw = File.ReadAllBytes(path);
+            int offset = 0;
+
+            if (raw.Length >= 2 && raw[0] == 0xFF && raw[1] == 0xFE)
+            {
+                encoding = Encoding.Unicode;
+                offset = 2;
+            }
+            else if (raw.Length >= 2 && raw[0] == 0xFE && raw[1] == 0xFF)
+            {
+                encoding = Encoding.BigEndianUnicode;
+                offset = 2;
+            }
+            else if (raw.Length >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF)
+            {
+                encoding = new UTF8Encoding(true);
+                offset = 3;
+            }
+            else
+            {
+                encoding = new UTF8Encoding(false);
+            }
+
+            string text = encoding.GetString(raw, offset, raw.Length - offset)
+                .Replace("\r\n", "\n").Replace('\r', '\n');
+
+            List<string> lines = new List<string>(text.Split('\n'));
+            if (lines.Count > 0 && lines[lines.Count - 1].Length == 0)
+                lines.RemoveAt(lines.Count - 1);
+            return lines;
+        }
+
+        private static void WriteThemeFile(string path, List<string> lines, Encoding encoding)
+        {
+            File.WriteAllText(path, string.Join("\r\n", lines.ToArray()) + "\r\n", encoding);
+        }
+
+        private static Encoding ParseThemeEncoding(string name, bool bom)
+        {
+            if (string.Equals(name, "utf-16", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, "utf-16le", StringComparison.OrdinalIgnoreCase))
+            {
+                return Encoding.Unicode;
+            }
+            if (string.Equals(name, "utf-16be", StringComparison.OrdinalIgnoreCase))
+                return Encoding.BigEndianUnicode;
+            return new UTF8Encoding(bom);
+        }
+
+        private static string GetThemeBackupPath()
+        {
+            string folder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "CurskinInstaller");
+            return Path.Combine(folder, ThemeBackupFileName);
+        }
+
+        private static void BackupThemeSection(string themePath, Encoding encoding,
+            List<string> lines, int start, int end)
+        {
+            string path = GetThemeBackupPath();
+            if (File.Exists(path))
+                return;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+
+            List<string> backup = new List<string>();
+            backup.Add("Path=" + themePath);
+            backup.Add("Encoding=" + encoding.WebName);
+            backup.Add("Bom=" + (encoding.GetPreamble().Length > 0 ? "1" : "0"));
+            backup.Add("#cursors");
+            for (int i = start + 1; i < end; i++)
+                backup.Add(lines[i]);
+
+            File.WriteAllLines(path, backup.ToArray(), Encoding.UTF8);
+        }
+
+        private static void RestoreThemeSection()
+        {
+            string path = GetThemeBackupPath();
+            if (!File.Exists(path))
+                return;
+
+            string themePath = "";
+            string encodingName = "utf-8";
+            bool bom = false;
+            bool inSection = false;
+            List<string> section = new List<string>();
+
+            foreach (string line in File.ReadAllLines(path))
+            {
+                if (!inSection)
+                {
+                    if (line.StartsWith("Path=", StringComparison.Ordinal))
+                        themePath = line.Substring(5);
+                    else if (line.StartsWith("Encoding=", StringComparison.Ordinal))
+                        encodingName = line.Substring(9);
+                    else if (line.StartsWith("Bom=", StringComparison.Ordinal))
+                        bom = line.Substring(4) == "1";
+                    else if (line == "#cursors")
+                        inSection = true;
+                    continue;
+                }
+                section.Add(line);
+            }
+
+            try
+            {
+                if (themePath.Length > 0 && File.Exists(themePath))
+                {
+                    Encoding readEncoding;
+                    List<string> lines = ReadThemeFile(themePath, out readEncoding);
+
+                    int start;
+                    int end;
+                    FindCursorSection(lines, out start, out end);
+                    if (start >= 0)
+                    {
+                        lines.RemoveRange(start + 1, end - start - 1);
+                        lines.InsertRange(start + 1, section);
+                        WriteThemeFile(themePath, lines, ParseThemeEncoding(encodingName, bom));
+                    }
+                }
+            }
+            catch
+            {
+                // A missing or locked theme file must not block the restore.
+            }
+
+            try
+            {
+                File.Delete(path);
+            }
+            catch
+            {
+            }
+        }
+
+        public static bool StartupRegistered
+        {
+            get
+            {
+                try
+                {
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath))
+                    {
+                        return key != null && key.GetValue(RunValueName) != null;
+                    }
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        public static void RegisterStartup()
+        {
+            string exe = Process.GetCurrentProcess().MainModule.FileName;
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe))
+                throw new InvalidOperationException("Could not find the Curskin Installer executable.");
+
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKeyPath))
+            {
+                key.SetValue(RunValueName, "\"" + exe + "\" --reapply", RegistryValueKind.String);
+            }
+        }
+
+        public static void UnregisterStartup()
+        {
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+            {
+                if (key != null)
+                    key.DeleteValue(RunValueName, false);
+            }
+        }
+
+        // Windows sometimes restores its own cursors at sign-in even though the
+        // custom scheme is still selected in the registry (fast startup, theme
+        // handling, and recent Windows 11 builds are known to do this). Re-apply
+        // the current HKCU selection to the logged-on session.
+        public static int ReapplyCurrentScheme()
+        {
+            string[] paths = new string[Roles.Length];
+
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(CursorKeyPath))
+            {
+                if (key == null)
+                    return 0;
+
+                for (int i = 0; i < Roles.Length; i++)
+                {
+                    object value = key.GetValue(Roles[i]);
+                    if (value == null)
+                        continue;
+
+                    string path = Convert.ToString(value, CultureInfo.InvariantCulture);
+                    if (string.IsNullOrWhiteSpace(path))
+                        continue;
+
+                    paths[i] = Environment.ExpandEnvironmentVariables(path.Trim());
+                }
+            }
+
+            // Reload every role from the registry first. This is the only API
+            // that also applies NWPen, Person, and Pin.
+            NativeMethods.SystemParametersInfo(NativeMethods.SPI_SETCURSORS, 0, IntPtr.Zero,
+                NativeMethods.SPIF_SENDCHANGE);
+
+            // Then force the roles that have a system cursor slot. This covers
+            // systems where the registry reload silently keeps its own cursors.
+            int applied = 0;
+            for (int i = 0; i < Roles.Length; i++)
+            {
+                uint slot = CursorSlotIds[i];
+                string path = paths[i];
+                if (slot == 0 || string.IsNullOrEmpty(path) || !File.Exists(path))
+                    continue;
+
+                IntPtr handle = NativeMethods.LoadCursorFromFile(path);
+                if (handle == IntPtr.Zero)
+                    continue;
+
+                // SetSystemCursor takes ownership of the handle and destroys it.
+                if (NativeMethods.SetSystemCursor(handle, slot))
+                    applied++;
+            }
+
+            return applied;
+        }
+
         public static bool HasBackup
         {
             get { return File.Exists(GetBackupPath()); }
@@ -313,6 +760,8 @@ namespace CurskinInstaller
             if (!File.Exists(path))
                 throw new InvalidOperationException("There is no saved cursor backup yet.");
 
+            bool hadStartup = StartupRegistered;
+
             Dictionary<string, string> values =
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (string line in File.ReadAllLines(path))
@@ -344,7 +793,18 @@ namespace CurskinInstaller
 
             NativeMethods.SystemParametersInfo(NativeMethods.SPI_SETCURSORS, 0, IntPtr.Zero,
                 NativeMethods.SPIF_SENDCHANGE);
-            return "The cursor settings saved before the first install were restored.";
+
+            bool hadTheme = File.Exists(GetThemeBackupPath());
+            RestoreThemeSection();
+
+            UnregisterStartup();
+
+            string message = "The cursor settings saved before the first install were restored.";
+            if (hadTheme)
+                message += " The active Windows theme was restored as well.";
+            if (hadStartup)
+                message += " Automatic re-applying at sign-in was turned off.";
+            return message;
         }
 
         private static void RestoreStringValue(RegistryKey key, string registryName,
@@ -464,5 +924,12 @@ namespace CurskinInstaller
 
         [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
         public static extern bool SystemParametersInfo(int action, int param, IntPtr data, int winIni);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true,
+            CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        public static extern IntPtr LoadCursorFromFile(string fileName);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SetSystemCursor(IntPtr cursor, uint id);
     }
 }

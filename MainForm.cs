@@ -26,6 +26,7 @@ namespace CurskinInstaller
         public List<CurskinVariant> Variants;
         public bool Mixed;
         public bool Apply;
+        public bool KeepAfterRestart;
     }
 
     class MainForm : Form
@@ -46,6 +47,7 @@ namespace CurskinInstaller
         private CheckedListBox variantList;
         private CheckBox mixedCheck;
         private CheckBox applyCheck;
+        private CheckBox keepCheck;
         private Button installButton;
         private Button restoreButton;
         private Button mouseButton;
@@ -177,24 +179,32 @@ namespace CurskinInstaller
 
             mixedCheck = new CheckBox();
             mixedCheck.Text = "Create a Mixed scheme";
-            mixedCheck.Location = new Point(510, 24);
-            mixedCheck.Size = new Size(215, 24);
+            mixedCheck.Location = new Point(510, 18);
+            mixedCheck.Size = new Size(215, 22);
             mixedCheck.Enabled = false;
             variants.Controls.Add(mixedCheck);
 
             Label mixedHelp = new Label();
             mixedHelp.Text = "One extra scheme that mixes the selected variants.";
-            mixedHelp.Location = new Point(510, 50);
-            mixedHelp.Size = new Size(215, 42);
+            mixedHelp.Location = new Point(510, 42);
+            mixedHelp.Size = new Size(215, 34);
             mixedHelp.ForeColor = Color.FromArgb(120, 130, 145);
             variants.Controls.Add(mixedHelp);
 
             applyCheck = new CheckBox();
             applyCheck.Text = "Apply after install";
-            applyCheck.Location = new Point(510, 100);
-            applyCheck.Size = new Size(215, 24);
+            applyCheck.Location = new Point(510, 80);
+            applyCheck.Size = new Size(215, 22);
             applyCheck.Checked = true;
+            applyCheck.CheckedChanged += delegate { UpdateControls(); };
             variants.Controls.Add(applyCheck);
+
+            keepCheck = new CheckBox();
+            keepCheck.Text = "Re-apply at sign-in";
+            keepCheck.Location = new Point(510, 104);
+            keepCheck.Size = new Size(215, 22);
+            keepCheck.Checked = false;
+            variants.Controls.Add(keepCheck);
 
             warningLabel = new Label();
             warningLabel.Location = new Point(20, 488);
@@ -257,6 +267,11 @@ namespace CurskinInstaller
             toolTip.AutoPopDelay = 15000;
             toolTip.InitialDelay = 400;
             toolTip.ReshowDelay = 100;
+            toolTip.SetToolTip(keepCheck,
+                "Optional. The install already keeps the scheme through a restart by updating the active " +
+                "Windows theme. Turn this on only if Windows still shows its own cursors after a sign-in: " +
+                "it adds a per-user sign-in entry that re-applies the scheme a few seconds later.");
+            toolTip.SetToolTip(applyCheck, "Apply the selected scheme right after installing.");
 
             DragEnter += DragEnterHandler;
             DragLeave += DragLeaveHandler;
@@ -434,6 +449,7 @@ namespace CurskinInstaller
             request.Variants = selected;
             request.Mixed = mixedCheck.Checked && selected.Count > 1;
             request.Apply = applyCheck.Checked;
+            request.KeepAfterRestart = applyCheck.Checked && keepCheck.Checked;
 
             SetBusy(true);
             statusLabel.Text = "Installing...";
@@ -469,7 +485,7 @@ namespace CurskinInstaller
             try
             {
                 e.Result = Installer.Install(request.File, request.Skin, request.Variants,
-                    request.Mixed, request.Apply, delegate(string message)
+                    request.Mixed, request.Apply, request.KeepAfterRestart, delegate(string message)
                     {
                         worker.ReportProgress(0, message);
                     });
@@ -508,6 +524,17 @@ namespace CurskinInstaller
             else
                 message += "\r\n\r\nOpen Mouse Properties to choose a scheme.";
             message += "\r\n\r\nFiles: " + result.InstallDir;
+            if (result.ThemeSynced)
+                message += "\r\n\r\nThe active Windows theme now uses this scheme, so a restart keeps the cursors " +
+                           "without any startup task.";
+            if (result.ThemeError != null)
+                message += "\r\n\r\nCould not update the active theme file: " + result.ThemeError +
+                           "\r\nIf the cursors change after a restart, turn on \"Re-apply at sign-in\".";
+            if (result.StartupRegistered)
+                message += "\r\n\r\nWindows will re-apply this scheme a few seconds after you sign in, " +
+                           "so a reboot does not leave you with the default cursors.";
+            if (result.StartupError != null)
+                message += "\r\n\r\nCould not add the sign-in entry: " + result.StartupError;
             if (result.MouseXRunning)
                 message += "\r\n\r\nMouse X is running. Quit it from the tray to see the new Windows cursors.";
 
@@ -543,6 +570,7 @@ namespace CurskinInstaller
             if (checkedCount < 2)
                 mixedCheck.Checked = false;
             applyCheck.Enabled = !busy && skin != null;
+            keepCheck.Enabled = !busy && skin != null && applyCheck.Checked;
             restoreButton.Enabled = !busy && Installer.HasBackup;
             closeButton.Enabled = !busy;
             progressBar.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;

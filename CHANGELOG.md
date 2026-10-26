@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here.
 
+## 1.0.2 - 2026-10-26
+
+- Keep cursors across a restart without a startup task. The installer now
+  rewrites the cursor section of the active Windows theme file, which is what
+  Windows reloads during logon. Previously the theme file kept describing the
+  default pointers, so a reboot left the scheme selected but the session showing
+  Windows' own cursors. Only `[Control Panel\Cursors]` is touched, and the
+  original section is restored by **Restore original cursors**.
+- The optional sign-in re-apply is now off by default and described as a
+  fallback. New `--startup` install switch; `--no-startup` remains accepted.
+- Restoring the original cursors also restores the theme cursor section.
+
+## 1.0.1 - 2026-10-26
+
+- Keep cursors across a restart. With **Re-apply at sign-in** enabled, the
+  installer adds a per-user `Run` entry that re-applies the current cursor
+  selection a few seconds after sign-in, because Windows can load its own
+  cursors at logon even when the custom scheme is still selected.
+- New `--reapply` command-line mode and `--no-startup` install switch.
+- Restoring the original cursors now removes the sign-in entry.
+
 ## 1.0.0 - 2026-10-21
 
 - Initial release.

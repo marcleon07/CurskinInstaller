@@ -19,6 +19,9 @@ No administrator rights. No background service. No telemetry.
 - Installs all 17 Windows cursor roles for each variant, with sensible fallbacks.
 - Optional **Mixed** scheme that rotates roles across selected variants.
 - Applies the scheme immediately, backs up your previous cursor state, and can restore it.
+- Keeps the scheme through a restart by updating the active Windows theme, so no
+  startup task is needed.
+- Optional sign-in re-apply for the rare cases where Windows still ignores it.
 - Per-user only: writes to `HKCU` and `%LOCALAPPDATA%`; never writes to `C:\Windows`.
 - Self-contained: the official `avifdec` and `resvg` helpers are embedded and
   extracted on first use.
@@ -38,7 +41,8 @@ so Windows SmartScreen may ask for confirmation.
 3. Select the variants you want. With two or more selected, you can also create
    a **Mixed** scheme.
 4. Leave **Apply after install** checked if you want the new cursors applied
-   immediately.
+   immediately. Leave **Re-apply at sign-in** off unless the cursors still
+   change after a reboot; it is a fallback, not a requirement.
 5. Click **Install selected**.
 
 Each selected variant becomes a Windows scheme named
@@ -53,6 +57,19 @@ or the app's **Mouse settings** button.
 > **Mouse X note:** Mouse X can draw its own cursor over the Windows cursor.
 > Quit Mouse X, including its tray process, to see the installed Windows cursor
 > on the desktop. The app warns you when it detects the Mouse X process.
+
+## Command line
+
+```bat
+CurskinInstaller.exe --install "skin.curskin" [--no-apply] [--no-mixed] [--startup]
+CurskinInstaller.exe --restore
+CurskinInstaller.exe --reapply
+```
+
+`--install` installs every usable variant. `--restore` puts back the saved
+cursor state. `--startup` adds the optional sign-in re-apply entry (`--no-startup`
+is the default). `--reapply` re-applies the current selection in
+`HKEY_CURRENT_USER\Control Panel\Cursors`, which is what that sign-in entry runs.
 
 ## Supported formats
 
@@ -78,7 +95,10 @@ not silently guessed; the installer reports a conversion error instead.
 | Cursor files | `%LOCALAPPDATA%\Microsoft\Windows\Cursors\<SkinName>\` |
 | Scheme registration | `HKEY_CURRENT_USER\Control Panel\Cursors\Schemes` |
 | Current cursor selection | `HKEY_CURRENT_USER\Control Panel\Cursors` |
+| Active Windows theme | `%LOCALAPPDATA%\Microsoft\Windows\Themes\<current>.theme` (cursor section only) |
+| Sign-in re-apply (optional) | `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\CurskinInstaller` |
 | Original cursor backup | `%LOCALAPPDATA%\CurskinInstaller\original-cursors.txt` |
+| Original theme cursor section | `%LOCALAPPDATA%\CurskinInstaller\original-theme.txt` |
 | Extracted helper tools | `%LOCALAPPDATA%\CurskinInstaller\tools\` |
 
 Everything is per-user. The app requests `asInvoker` and does not need
@@ -95,9 +115,11 @@ create duplicate cursors. The option is disabled for a single variant.
 ## Restore and uninstall
 
 The first time the app applies a scheme, it saves your current cursor settings
-to `%LOCALAPPDATA%\CurskinInstaller\original-cursors.txt`. Click **Restore
-original cursors** to put them back. The backup is not overwritten by later
-installs; delete the file if you want a new baseline.
+to `%LOCALAPPDATA%\CurskinInstaller\original-cursors.txt` and the cursor section
+of the active theme to `original-theme.txt`. Click **Restore original cursors**
+to put them back. The backups are not overwritten by later installs; delete the
+files if you want a new baseline. Restoring also removes the sign-in re-apply
+entry.
 
 Restoring does not remove installed schemes. To remove a scheme, delete its
 folder under `%LOCALAPPDATA%\Microsoft\Windows\Cursors\` and its value under
@@ -105,7 +127,70 @@ folder under `%LOCALAPPDATA%\Microsoft\Windows\Cursors\` and its value under
 
 The app itself is portable; delete `CurskinInstaller.exe` to remove it. You can
 also delete `%LOCALAPPDATA%\CurskinInstaller\` after removing any schemes you no
-longer want.
+longer want. If you delete the app without restoring first, also delete the
+`CurskinInstaller` value under
+`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+## Cursors revert after a restart
+
+### The cause
+
+A Windows theme file (`.theme`) carries its own `[Control Panel\Cursors]`
+section, and Windows reloads the active theme during logon. That reload writes
+the theme's cursor paths into
+`HKEY_CURRENT_USER\Control Panel\Cursors` but leaves the scheme name alone. If
+the theme still describes the default pointers, the result is exactly the usual
+symptom: Mouse Properties still shows your Curskin scheme, but the desktop has
+the default cursors.
+
+### What the installer does about it
+
+When it applies a scheme, the installer also rewrites the cursor section of the
+active theme file to match the scheme. The next logon reloads the same cursors
+instead of the defaults. Nothing has to start with Windows: there is no service,
+no scheduled task, and no `Run` entry unless you ask for one.
+
+The original cursor section is saved to
+`%LOCALAPPDATA%\CurskinInstaller\original-theme.txt` and put back by
+**Restore original cursors**. Only the `[Control Panel\Cursors]` section is
+touched, so wallpaper, colors, sounds, and icons stay as they are.
+
+If the active theme file cannot be written (for example, a theme stored under
+`C:\Windows\Resources\Themes`), the install still succeeds and the result dialog
+says so. In that case, or if Windows still overrides the pointers, enable
+**Re-apply at sign-in**.
+
+### Fallback: re-apply at sign-in
+
+With **Re-apply at sign-in** checked, the installer adds one per-user `Run`
+entry. It starts `CurskinInstaller.exe --reapply` after sign-in, which reads the
+current selection from `HKEY_CURRENT_USER\Control Panel\Cursors`, reloads it,
+and retries a few times over the first half minute. It is not a service, it
+does not poll in the background, and it exits on its own.
+
+You can run the same repair manually:
+
+```bat
+CurskinInstaller.exe --reapply
+```
+
+`--reapply` does not change the registry; it only applies the selection that is
+already stored there, so it follows whatever scheme you picked in Mouse
+Properties. The `NWPen`, `Person`, and `Pin` roles have no `SetSystemCursor`
+slot, so they depend on the normal Windows reload.
+
+### Other things to check
+
+- Turn off fast startup (Control Panel > Power Options > Choose what the power
+  buttons do).
+- Keep the scheme's cursor files where the installer puts them. Moving them to
+  a temporary folder makes Windows fall back to its own pointers.
+- If you apply a different Windows theme later, re-run the install: that theme's
+  file has its own cursor section, so activate the Curskin scheme again.
+- `ThemeChangesMousePointers` under
+  `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes` can be
+  set to `0` if you would rather have Windows stop taking pointers from themes
+  at all.
 
 ## Build from source
 
@@ -133,10 +218,10 @@ and uses the in-box .NET Framework compiler; it is the build used by
 To build a release zip:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File package.ps1 -Version 1.0.0
+powershell -ExecutionPolicy Bypass -File package.ps1 -Version 1.0.2
 ```
 
-The zip is written to `dist\CurskinInstaller-1.0.0-win64.zip`.
+The zip is written to `dist\CurskinInstaller-1.0.2-win64.zip`.
 
 ### Visual Studio 2022
 
@@ -155,7 +240,7 @@ goes to `bin\Debug\` or `bin\Release\`.
 | --- | --- |
 | `Core.cs` | `.curskin` parser, data model, CLI entry point |
 | `CursorBuilder.cs` | GIF/PNG/AVIF/AVIS/SVG to `.cur`/`.ani` conversion |
-| `Installer.cs` | Scheme registration, apply, backup, restore |
+| `Installer.cs` | Scheme registration, apply, theme sync, backup, restore |
 | `ExternalTools.cs` | Embedded helper extraction and process runner |
 | `MainForm.cs` | WinForms drag-and-drop UI |
 | `CurskinInstaller.sln`, `CurskinInstaller.csproj` | Visual Studio 2022 solution and project |
@@ -177,7 +262,10 @@ goes to `bin\Debug\` or `bin\Release\`.
 2. The builder rasterizes each cursor at 32x32. AVIF/AVIS is decoded with
    `avifdec`; SVG and layered SVG are rendered with `resvg`.
 3. The installer writes `.cur`/`.ani` files, registers the scheme under
-   `HKCU`, and applies it with `SystemParametersInfo(SPI_SETCURSORS)`.
+   `HKCU`, and applies it with `SystemParametersInfo(SPI_SETCURSORS)`. It also
+   rewrites the cursor section of the active theme file, because Windows reloads
+   that file during logon. If you enable **Re-apply at sign-in**, it also adds a
+   per-user `Run` entry that repeats the apply after logon.
 4. The GUI is a single WinForms window with drag-and-drop and variant
    selection.
 
@@ -203,6 +291,11 @@ manual. Bug reports with a sample `.curskin` file are welcome.
 - Cursors are rendered at 32x32; larger Windows cursor sizes are scaled by
   Windows.
 - Mouse X can overlay its own cursor; quit it to see the native result.
+- `NWPen`, `Person`, and `Pin` cannot be forced through `SetSystemCursor`, so an
+  immediate apply relies on the normal Windows cursor reload for those three.
+- Only the cursor section of the active theme file is updated. If you switch to a
+  different theme afterwards, apply the Curskin scheme again so the new theme
+  file carries it.
 - The app is unsigned, so SmartScreen may prompt on first run.
 - Unknown image formats fail with a conversion error rather than being guessed.
 

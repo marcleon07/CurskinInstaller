@@ -11,7 +11,8 @@ Quick start
 3. Select the variants you want.
    If you select two or more, you can also create a Mixed scheme.
 4. Leave "Apply after install" checked if you want the new cursors applied
-   immediately.
+   immediately. Leave "Re-apply at sign-in" off unless the cursors still
+   change after a reboot; it is a fallback, not a requirement.
 5. Click "Install selected".
 
 The success dialog shows the installed scheme name(s), the scheme that was
@@ -40,6 +41,15 @@ Scheme registrations:
 Current cursor selection (when Apply is checked):
 
   HKEY_CURRENT_USER\Control Panel\Cursors
+
+Cursor section of the active Windows theme (when Apply is checked), so the
+scheme survives a restart without a startup task:
+
+  %LOCALAPPDATA%\Microsoft\Windows\Themes\<current>.theme
+
+Sign-in re-apply (only when both check boxes are checked):
+
+  HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\CurskinInstaller
 
 Everything is per-user. The app never writes to C:\Windows and does not
 request elevation.
@@ -79,13 +89,54 @@ to:
 
   %LOCALAPPDATA%\CurskinInstaller\original-cursors.txt
 
-Click "Restore original cursors" to put those settings back. Restoring does
-not remove the installed schemes; you can still select them later in Mouse
-Properties.
+and the cursor section of the active theme to:
 
-The backup is deliberately not overwritten by later installs, so it keeps the
-state from before the first install. If you want a new baseline, delete that
-file and apply a scheme again.
+  %LOCALAPPDATA%\CurskinInstaller\original-theme.txt
+
+Click "Restore original cursors" to put those settings back. Restoring also
+removes the sign-in re-apply entry. Restoring does not remove the installed
+schemes; you can still select them later in Mouse Properties.
+
+The backups are deliberately not overwritten by later installs, so they keep
+the state from before the first install. If you want a new baseline, delete the
+files and apply a scheme again.
+
+Cursors reverting after a restart
+---------------------------------
+Cause: a Windows theme file (.theme) carries its own [Control Panel\Cursors]
+section, and Windows reloads the active theme during logon. That reload writes
+the theme's cursor paths into HKEY_CURRENT_USER\Control Panel\Cursors but leaves
+the scheme name alone. If the theme still describes the default pointers, Mouse
+Properties keeps showing your Curskin scheme while the desktop shows the
+default cursors.
+
+What the installer does: when it applies a scheme, it also rewrites the cursor
+section of the active theme file to match the scheme, so the next logon reloads
+the same cursors. Nothing starts with Windows. Only that one section is
+changed; wallpaper, colors, sounds, and icons are untouched.
+
+If the theme file cannot be written, or Windows still overrides the pointers,
+turn on "Re-apply at sign-in". That adds one per-user Run entry which runs:
+
+  CurskinInstaller.exe --reapply
+
+It reads the current selection from HKEY_CURRENT_USER\Control Panel\Cursors,
+reloads it, and retries several times during the first half minute after
+sign-in. It is not a service and does not keep running.
+
+You can run the same repair by hand:
+
+  CurskinInstaller.exe --reapply
+
+Other things to check:
+- Turn off fast startup in Control Panel > Power Options.
+- If you apply a different Windows theme later, apply the Curskin scheme again
+  so the new theme file carries it.
+- NWPen, Person, and Pin have no SetSystemCursor slot, so an immediate apply
+  relies on the normal Windows cursor reload for those three.
+- Set ThemeChangesMousePointers to 0 under
+  HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes if you would
+  rather have Windows stop taking pointers from themes at all.
 
 Built-in decoders
 -----------------
@@ -113,6 +164,9 @@ Notes
 - Installed schemes are normal Windows schemes. You can remove them later in
   Mouse Properties or by deleting the corresponding folder and registry value
   under HKEY_CURRENT_USER\Control Panel\Cursors\Schemes.
+- If you delete the app without clicking Restore first, also delete the
+  CurskinInstaller value under
+  HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run.
 - The executable is larger than a typical small utility because the AVIF and
   SVG decoders are embedded inside it.
 
